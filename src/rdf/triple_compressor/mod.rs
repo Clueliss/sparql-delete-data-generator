@@ -6,8 +6,36 @@ use std::{
     fs::{File, OpenOptions},
     hash::Hasher,
     io::{BufRead, BufReader, BufWriter, ErrorKind, Write},
+    ops::Deref,
     path::Path,
 };
+
+pub const COMPRESSOR_STATE_FILE_EXTENSION: &str = "compressor_state";
+pub const COMPRESSED_TRIPLE_FILE_EXTENSION: &str = "compressed_nt";
+
+pub struct CompressedRdfTriples(MemoryMapped<[[u64; 3]]>);
+
+impl CompressedRdfTriples {
+    pub fn load<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
+        MemoryMapped::open(path).map(CompressedRdfTriples)
+    }
+
+    pub fn contains(&self, triple: &[u64; 3]) -> bool {
+        self.0.binary_search(triple).is_ok()
+    }
+
+    pub fn into_inner(self) -> MemoryMapped<[[u64; 3]]> {
+        self.0
+    }
+}
+
+impl Deref for CompressedRdfTriples {
+    type Target = MemoryMapped<[[u64; 3]]>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 #[derive(Default)]
 pub struct RdfTripleCompressor {
@@ -82,15 +110,12 @@ impl RdfTripleCompressor {
     }
 
     pub fn compress_rdf_triple_file<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<()> {
-        {
-            let mut bw = BufWriter::new(
-                File::options()
-                    .write(true)
-                    .create_new(true)
-                    .open(path.as_ref().with_extension("compressed"))?,
-            );
+        let out_path = path.as_ref().with_extension(COMPRESSOR_STATE_FILE_EXTENSION);
 
-            let triples = BufReader::new(File::open(path.as_ref())?).lines();
+        {
+            let mut bw = BufWriter::new(File::options().write(true).create_new(true).open(&out_path)?);
+
+            let triples = BufReader::new(File::open(path)?).lines();
 
             for line in triples {
                 let line = line?;
@@ -110,12 +135,8 @@ impl RdfTripleCompressor {
             }
         }
 
-        let mut mapped_slice: MemoryMapped<[[u64; 3]]> = unsafe {
-            MemoryMapped::options()
-                .read(true)
-                .write(true)
-                .open_shared(path.as_ref().with_extension("compressed"))
-        }?;
+        let mut mapped_slice: MemoryMapped<[[u64; 3]]> =
+            unsafe { MemoryMapped::options().read(true).write(true).open_shared(out_path) }?;
 
         mapped_slice.sort_unstable();
 

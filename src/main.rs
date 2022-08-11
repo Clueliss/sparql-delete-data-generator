@@ -4,7 +4,10 @@ mod rdf;
 
 use clap::{Parser, Subcommand};
 use memory_mapped::MemoryMapped;
-use rdf::triple_compressor::{frozen::FrozenRdfTripleCompressor, RdfTripleCompressor};
+use rdf::triple_compressor::{
+    frozen::FrozenRdfTripleCompressor, CompressedRdfTriples, RdfTripleCompressor, COMPRESSED_TRIPLE_FILE_EXTENSION,
+    COMPRESSOR_STATE_FILE_EXTENSION,
+};
 use std::{
     collections::HashSet,
     fs::File,
@@ -61,15 +64,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            compressor.freeze(opts.dataset.with_extension("frozen_translations"))?;
+            compressor.freeze(opts.dataset.with_extension(COMPRESSOR_STATE_FILE_EXTENSION))?;
         },
         Action::Select { count, out_file } => {
             println!("loading main dataset...");
 
             let compressor =
-                FrozenRdfTripleCompressor::load_frozen(opts.dataset.with_extension("frozen_translations"))?;
+                FrozenRdfTripleCompressor::load_frozen(opts.dataset.with_extension(COMPRESSOR_STATE_FILE_EXTENSION))?;
 
-            let dataset_triples = rdf::CompressedRdfTriples::load(opts.dataset.with_extension("compressed"))?;
+            let dataset_triples =
+                CompressedRdfTriples::load(opts.dataset.with_extension(COMPRESSED_TRIPLE_FILE_EXTENSION))?;
 
             println!("loaded {} triples from main dataset", dataset_triples.len());
 

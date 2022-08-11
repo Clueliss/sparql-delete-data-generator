@@ -1,33 +1,8 @@
-use crate::MemoryMapped;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
-use std::{ops::Deref, path::Path};
+use std::path::Path;
 
 pub mod triple_compressor;
 pub mod triple_generator;
-
-pub struct CompressedRdfTriples(MemoryMapped<[[u64; 3]]>);
-
-impl CompressedRdfTriples {
-    pub fn load<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
-        MemoryMapped::open(path).map(CompressedRdfTriples)
-    }
-
-    pub fn contains(&self, triple: &[u64; 3]) -> bool {
-        self.0.binary_search(triple).is_ok()
-    }
-
-    pub fn into_inner(self) -> MemoryMapped<[[u64; 3]]> {
-        self.0
-    }
-}
-
-impl Deref for CompressedRdfTriples {
-    type Target = MemoryMapped<[[u64; 3]]>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
 
 pub fn split_rdf_triple(triple: &str) -> Option<[&str; 3]> {
     let mut split = triple.splitn(3, ' ');
@@ -43,7 +18,8 @@ pub fn changeset_file_iter<P: AsRef<Path>>(
     path: P,
 ) -> impl Iterator<Item = walkdir::Result<(NaiveDateTime, walkdir::DirEntry)>> {
     let is_nt_file = |dir_entry: &walkdir::DirEntry| {
-        dir_entry.file_type().is_file() && matches!(dir_entry.path().extension(), Some(ext) if ext == "compressed")
+        dir_entry.file_type().is_file()
+            && matches!(dir_entry.path().extension(), Some(ext) if ext == triple_compressor::COMPRESSED_TRIPLE_FILE_EXTENSION)
     };
 
     walkdir::WalkDir::new(path)

@@ -20,7 +20,7 @@ pub fn changeset_triple_generator(
         .iter()
         .chain(sorted_changesets[..start_off].iter().rev())
         .flat_map(|(_, changeset_dir_entry)| {
-            super::CompressedRdfTriples::load(changeset_dir_entry.path())
+            super::triple_compressor::CompressedRdfTriples::load(changeset_dir_entry.path())
                 .unwrap()
                 .into_inner()
                 .into_iter()
