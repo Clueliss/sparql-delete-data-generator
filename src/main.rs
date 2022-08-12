@@ -1,53 +1,60 @@
 #![feature(hasher_prefixfree_extras)]
 
 mod rdf;
+mod sparql;
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use memory_mapped::MemoryMapped;
-use rdf::triple_compressor::{
-    frozen::FrozenRdfTripleCompressor, CompressedRdfTriples, RdfTripleCompressor, COMPRESSED_TRIPLE_FILE_EXTENSION,
-    COMPRESSOR_STATE_FILE_EXTENSION,
-};
-use std::{
-    collections::HashSet,
-    fs::File,
-    hash::BuildHasherDefault,
-    io::{BufWriter, Write},
-    path::PathBuf,
-};
+use rdf::triple_compressor::{frozen::FrozenRdfTripleCompressor, CompressedRdfTriples, RdfTripleCompressor};
+use std::path::PathBuf;
 
 #[derive(Parser)]
-struct Opts {
-    #[clap(short, long)]
-    dataset: PathBuf,
-
-    #[clap(subcommand)]
-    action: Action,
-
-    #[clap(long)]
-    changeset_dir: Option<PathBuf>,
-}
-
-#[derive(Subcommand)]
-enum Action {
+#[clap(author, version, about)]
+enum Opts {
+    /// Compress an n-triples dataset
     Compress {
-        #[clap(long)]
+        /// Path to an existing compressor state to be used to compress more data
+        #[clap(short = 's', long)]
         previous_compressor_state: Option<PathBuf>,
-    },
-    Select {
-        #[clap(short = 'n', long)]
-        count: usize,
 
+        /// Dataset to compress
+        #[clap(short = 'i', long)]
+        dataset: PathBuf,
+
+        /// Path to directory tree containing all changesets.
+        /// Expected tree structure: year/month/day/hour/changeset
+        #[clap(short = 'c', long)]
+        changeset_dir: Option<PathBuf>,
+    },
+    /// Generate SPARQL DELETE DATA queries from a compressed dataset
+    Generate {
+        /// Path to the associated compressor state
+        #[clap(short = 's', long)]
+        compressor_state: PathBuf,
+
+        /// Path to the compressed dataset
+        #[clap(short = 'i', long)]
+        compressed_dataset: PathBuf,
+
+        /// Path to the directory tree containing the compressed changesets.
+        /// Expected tree structure: year/month/day/hour/changeset
+        #[clap(short = 'c', long)]
+        compressed_changeset_dir: Option<PathBuf>,
+
+        /// File to write the query to
         #[clap(short = 'o', long)]
         out_file: PathBuf,
+
+        /// Query specs of the form <N_QUERIES>x<N_TRIPLE_PER_QUERY>
+        query_specs: Vec<sparql::QuerySpec>,
     },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opts: Opts = Opts::parse();
 
-    match opts.action {
-        Action::Compress { previous_compressor_state } => {
+    match opts {
+        Opts::Compress { previous_compressor_state, dataset, changeset_dir } => {
             let mut compressor = if let Some(pcs) = previous_compressor_state {
                 let frozen = FrozenRdfTripleCompressor::load_frozen(pcs)?;
                 RdfTripleCompressor::from_frozen(frozen)
@@ -55,81 +62,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 RdfTripleCompressor::new()
             };
 
-            compressor.compress_rdf_triple_file(&opts.dataset)?;
+            compressor.compress_rdf_triple_file(&dataset)?;
 
-            if let Some(changeset_dir) = &opts.changeset_dir {
+            if let Some(changeset_dir) = changeset_dir {
                 for changeset in rdf::changeset_file_iter(changeset_dir) {
                     let (_, changeset) = changeset.unwrap();
                     compressor.compress_rdf_triple_file(changeset.path())?;
                 }
             }
 
-            compressor.freeze(opts.dataset.with_extension(COMPRESSOR_STATE_FILE_EXTENSION))?;
+            compressor.freeze(dataset)?;
         },
-        Action::Select { count, out_file } => {
+        Opts::Generate {
+            compressor_state,
+            compressed_dataset,
+            compressed_changeset_dir,
+            out_file,
+            query_specs,
+        } => {
             println!("loading main dataset...");
 
-            let compressor =
-                FrozenRdfTripleCompressor::load_frozen(opts.dataset.with_extension(COMPRESSOR_STATE_FILE_EXTENSION))?;
+            let compressor = FrozenRdfTripleCompressor::load_frozen(compressor_state)?;
 
-            let dataset_triples =
-                CompressedRdfTriples::load(opts.dataset.with_extension(COMPRESSED_TRIPLE_FILE_EXTENSION))?;
+            let dataset_triples = CompressedRdfTriples::load(compressed_dataset)?;
 
             println!("loaded {} triples from main dataset", dataset_triples.len());
 
-            let remove_set: HashSet<_, BuildHasherDefault<ahash::AHasher>> =
-                if let Some(changeset_dir) = &opts.changeset_dir {
-                    println!("selecting triples from changesets...");
+            if let Some(changeset_dir) = compressed_changeset_dir {
+                println!("generating queries from changesets...");
 
-                    let changesets = {
-                        let mut tmp: Vec<_> = rdf::changeset_file_iter(changeset_dir).filter_map(Result::ok).collect();
+                let changesets = {
+                    let mut tmp: Vec<_> = rdf::changeset_file_iter(changeset_dir)
+                        .filter_map(Result::ok)
+                        .filter_map(|(datetime, de)| {
+                            CompressedRdfTriples::load(de.path())
+                                .map(|triples| (datetime, triples))
+                                .ok()
+                        })
+                        .collect();
 
-                        tmp.sort_unstable_by_key(|(datetime, _)| *datetime);
-                        tmp
-                    };
-
-                    let mut remove_set = HashSet::default();
-                    let mut generator = rdf::triple_generator::changeset_triple_generator(&changesets)
-                        .filter(|triple| dataset_triples.contains(triple));
-
-                    while remove_set.len() < count && let Some(triple) = generator.next() {
-                    remove_set.insert(triple);
-                }
-
-                    remove_set
-                } else {
-                    println!("selecting random triples...");
-
-                    rdf::triple_generator::random_triple_generator(&dataset_triples)
-                        .take(count)
-                        .collect()
+                    tmp.sort_unstable_by_key(|(datetime, _)| *datetime);
+                    tmp
                 };
 
-            println!("selected {} triples", remove_set.len());
-            println!("generating query...");
+                sparql::generate_queries(out_file, &compressor, query_specs, || {
+                    rdf::triple_generator::changeset_triple_generator(&changesets)
+                        .filter(|triple| dataset_triples.contains(triple))
+                })?;
+            } else {
+                println!("generating queries from main dataset...");
 
-            let mut bw = BufWriter::new(File::create(out_file)?);
-            write_delete_data_query(&mut bw, remove_set, &compressor)?;
+                sparql::generate_queries(out_file, &compressor, query_specs, || {
+                    rdf::triple_generator::random_triple_generator(&dataset_triples)
+                })?;
+            }
         },
     }
 
     Ok(())
-}
-
-fn write_delete_data_query<W: Write>(
-    writer: &mut W,
-    triples: impl IntoIterator<Item = [u64; 3]>,
-    compressor: &FrozenRdfTripleCompressor,
-) -> std::io::Result<()> {
-    writeln!(writer, "DELETE DATA {{")?;
-
-    for triple in triples {
-        let [s, p, o] = compressor
-            .decompress_rdf_triple(&triple)
-            .expect("to use same compressor as used for compression");
-
-        writeln!(writer, "  {s} {p} {o} .")?;
-    }
-
-    writeln!(writer, "}}")
 }
