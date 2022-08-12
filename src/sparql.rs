@@ -48,7 +48,7 @@ where
     let mut bw = BufWriter::new(File::create(out_file)?);
 
     for QuerySpec { n_queries, n_triples_per_query } in query_specs {
-        println!("now generating {n_queries}x{n_triples_per_query} query set");
+        println!("now generating {n_queries}x{n_triples_per_query} query set...");
 
         for _ in 0..n_queries {
             let mut triple_generator = triple_generator_factory();
@@ -60,7 +60,7 @@ where
             }
 
             if remove_set.len() < n_triples_per_query {
-                println!("Warning: not enough triples available to generate query of size {n_triples_per_query}");
+                println!("Warning: not enough triples available to generate query of size {n_triples_per_query} available count is {}", remove_set.len());
             }
 
             write_delete_data_query(&mut bw, remove_set, compressor)?;
