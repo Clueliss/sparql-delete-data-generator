@@ -48,7 +48,7 @@ impl RdfTripleCompressor {
     }
 
     pub fn freeze<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<()> {
-        let f = OpenOptions::new().write(true).create_new(true).open(path)?;
+        let f = OpenOptions::new().write(true).create(true).open(path)?;
 
         let mut bw = BufWriter::new(f);
 
@@ -110,7 +110,7 @@ impl RdfTripleCompressor {
     }
 
     pub fn compress_rdf_triple_file<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<()> {
-        let out_path = path.as_ref().with_extension(COMPRESSOR_STATE_FILE_EXTENSION);
+        let out_path = path.as_ref().with_extension(COMPRESSED_TRIPLE_FILE_EXTENSION);
 
         {
             let mut bw = BufWriter::new(File::options().write(true).create_new(true).open(&out_path)?);

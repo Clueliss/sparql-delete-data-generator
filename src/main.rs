@@ -14,17 +14,20 @@ enum Opts {
     /// Compress an n-triples dataset
     Compress {
         /// Path to an existing compressor state to be used to compress more data
-        #[clap(short = 's', long)]
+        #[clap(short = 'i', long)]
         previous_compressor_state: Option<PathBuf>,
 
-        /// Dataset to compress
-        #[clap(short = 'i', long)]
-        dataset: PathBuf,
+        /// Path to file in which the resulting compressor state should be written.
+        /// Defaults to same path as previous-compressor-state if provided
+        #[clap(short = 'o', long, required_unless_present("previous-compressor-state"))]
+        compressor_state_out: Option<PathBuf>,
 
-        /// Path to directory tree containing all changesets.
-        /// Expected tree structure: year/month/day/hour/changeset
-        #[clap(short = 'c', long)]
-        changeset_dir: Option<PathBuf>,
+        /// Operate recursively on directories
+        #[clap(short = 'r', long)]
+        recursive: bool,
+
+        /// Datasets to compress
+        datasets: Vec<PathBuf>,
     },
     /// Generate SPARQL DELETE DATA queries from a compressed dataset
     Generate {
@@ -37,13 +40,12 @@ enum Opts {
         compressed_dataset: PathBuf,
 
         /// Path to the directory tree containing the compressed changesets.
-        /// Expected tree structure: year/month/day/hour/changeset
         #[clap(short = 'c', long)]
         compressed_changeset_dir: Option<PathBuf>,
 
         /// File to write the query to
         #[clap(short = 'o', long)]
-        out_file: PathBuf,
+        query_out: PathBuf,
 
         /// Query specs of the form <N_QUERIES>x<N_TRIPLE_PER_QUERY>
         query_specs: Vec<sparql::QuerySpec>,
@@ -54,30 +56,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opts: Opts = Opts::parse();
 
     match opts {
-        Opts::Compress { previous_compressor_state, dataset, changeset_dir } => {
-            let mut compressor = if let Some(pcs) = previous_compressor_state {
+        Opts::Compress { previous_compressor_state, compressor_state_out, recursive, datasets } => {
+            let mut compressor = if let Some(pcs) = &previous_compressor_state {
                 let frozen = FrozenRdfTripleCompressor::load_frozen(pcs)?;
                 RdfTripleCompressor::from_frozen(frozen)
             } else {
                 RdfTripleCompressor::new()
             };
 
-            compressor.compress_rdf_triple_file(&dataset)?;
+            for dataset in datasets {
+                if recursive && dataset.is_dir() {
+                    for file in walkdir::WalkDir::new(dataset) {
+                        let file = file?;
 
-            if let Some(changeset_dir) = changeset_dir {
-                for changeset in rdf::changeset_file_iter(changeset_dir) {
-                    let (_, changeset) = changeset.unwrap();
-                    compressor.compress_rdf_triple_file(changeset.path())?;
+                        if file.file_type().is_file() && matches!(file.path().extension(), Some(ext) if ext == "nt") {
+                            compressor.compress_rdf_triple_file(file.path())?;
+                        }
+                    }
+                } else {
+                    compressor.compress_rdf_triple_file(dataset)?;
                 }
             }
 
-            compressor.freeze(dataset)?;
+            compressor.freeze(compressor_state_out.unwrap_or_else(|| {
+                previous_compressor_state.expect("previous compressor state if no compressor out specified")
+            }))?;
         },
         Opts::Generate {
             compressor_state,
             compressed_dataset,
             compressed_changeset_dir,
-            out_file,
+            query_out,
             query_specs,
         } => {
             println!("loading main dataset...");
@@ -91,28 +100,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(changeset_dir) = compressed_changeset_dir {
                 println!("generating queries from changesets...");
 
-                let changesets = {
-                    let mut tmp: Vec<_> = rdf::changeset_file_iter(changeset_dir)
-                        .filter_map(Result::ok)
-                        .filter_map(|(datetime, de)| {
-                            CompressedRdfTriples::load(de.path())
-                                .map(|triples| (datetime, triples))
-                                .ok()
-                        })
-                        .collect();
+                let changesets: Vec<_> = rdf::changeset_file_iter(changeset_dir)
+                    .map(Result::unwrap)
+                    .filter_map(|de| match CompressedRdfTriples::load(de.path()) {
+                        Ok(triples) => Some(triples),
+                        Err(e) => {
+                            eprintln!("Error: unable to open {:?}: {e:?}", de.path());
+                            None
+                        }
+                    })
+                    .collect();
 
-                    tmp.sort_unstable_by_key(|(datetime, _)| *datetime);
-                    tmp
-                };
-
-                sparql::generate_queries(out_file, &compressor, query_specs, || {
+                sparql::generate_queries(query_out, &compressor, query_specs, || {
                     rdf::triple_generator::changeset_triple_generator(&changesets)
                         .filter(|triple| dataset_triples.contains(triple))
                 })?;
             } else {
                 println!("generating queries from main dataset...");
 
-                sparql::generate_queries(out_file, &compressor, query_specs, || {
+                sparql::generate_queries(query_out, &compressor, query_specs, || {
                     rdf::triple_generator::random_triple_generator(&dataset_triples)
                 })?;
             }
