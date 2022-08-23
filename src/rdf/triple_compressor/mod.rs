@@ -5,7 +5,7 @@ use std::{
     collections::BTreeMap,
     fs::{File, OpenOptions},
     hash::Hasher,
-    io::{BufRead, BufReader, BufWriter, ErrorKind, Write},
+    io::{BufRead, BufReader, BufWriter, Write},
     ops::Deref,
     path::Path,
 };
@@ -120,12 +120,14 @@ impl RdfTripleCompressor {
             for line in triples {
                 let line = line?;
 
-                if line.starts_with('#') {
+                if line.is_empty() || line.starts_with('#') {
                     continue;
                 }
 
-                let triple = super::split_rdf_triple(&line)
-                    .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidData, "invalid rdf triple found"))?;
+                let Some(triple) = super::split_rdf_triple(&line) else {
+                    eprintln!("ignoring invalid rdf triple: {line:?}");
+                    continue;
+                };
 
                 let [subject, predicate, object] = self.compress_rdf_triple_str(triple);
 

@@ -1,4 +1,4 @@
-#![feature(hasher_prefixfree_extras)]
+#![feature(hasher_prefixfree_extras, let_else)]
 
 mod rdf;
 mod sparql;
