@@ -12,7 +12,7 @@ impl FrozenRdfTripleCompressor {
         Some(&self.header[ix])
     }
 
-    pub fn load_frozen<P: AsRef<Path>>(path: P) -> std::io::Result<FrozenRdfTripleCompressor> {
+    pub unsafe fn load_frozen<P: AsRef<Path>>(path: P) -> std::io::Result<FrozenRdfTripleCompressor> {
         let header_size = {
             let mut f = File::open(path.as_ref())?;
 
@@ -26,12 +26,14 @@ impl FrozenRdfTripleCompressor {
             .read(true)
             .byte_offset(std::mem::size_of::<usize>())
             .byte_len(header_size)
-            .open(path.as_ref())?;
+            .open_slice(path.as_ref())?
+            .assume_init();
 
         let data_segment = MemoryMapped::options()
             .read(true)
             .byte_offset(std::mem::size_of::<usize>() + header_size)
-            .open(path.as_ref())?;
+            .open_slice(path.as_ref())?
+            .assume_init();
 
         Ok(Self { header, data_segment })
     }

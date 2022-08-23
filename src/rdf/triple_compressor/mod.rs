@@ -16,8 +16,8 @@ pub const COMPRESSED_TRIPLE_FILE_EXTENSION: &str = "compressed_nt";
 pub struct CompressedRdfTriples(MemoryMapped<[[u64; 3]]>);
 
 impl CompressedRdfTriples {
-    pub fn load<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
-        MemoryMapped::open(path).map(CompressedRdfTriples)
+    pub unsafe fn load<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
+        Ok(CompressedRdfTriples(MemoryMapped::open_slice(path)?.assume_init()))
     }
 
     pub fn contains(&self, triple: &[u64; 3]) -> bool {
@@ -135,8 +135,13 @@ impl RdfTripleCompressor {
             }
         }
 
-        let mut mapped_slice: MemoryMapped<[[u64; 3]]> =
-            unsafe { MemoryMapped::options().read(true).write(true).open_shared(out_path) }?;
+        let mut mapped_slice: MemoryMapped<[[u64; 3]]> = unsafe {
+            MemoryMapped::options()
+                .read(true)
+                .write(true)
+                .open_shared_slice(out_path)?
+                .assume_init()
+        };
 
         mapped_slice.sort_unstable();
 

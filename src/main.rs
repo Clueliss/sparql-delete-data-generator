@@ -58,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match opts {
         Opts::Compress { previous_compressor_state, compressor_state_out, recursive, datasets } => {
             let mut compressor = if let Some(pcs) = &previous_compressor_state {
-                let frozen = FrozenRdfTripleCompressor::load_frozen(pcs)?;
+                let frozen = unsafe { FrozenRdfTripleCompressor::load_frozen(pcs)? };
                 RdfTripleCompressor::from_frozen(frozen)
             } else {
                 RdfTripleCompressor::new()
@@ -91,9 +91,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             println!("loading main dataset...");
 
-            let compressor = FrozenRdfTripleCompressor::load_frozen(compressor_state)?;
-
-            let dataset_triples = CompressedRdfTriples::load(compressed_dataset)?;
+            let compressor = unsafe { FrozenRdfTripleCompressor::load_frozen(compressor_state)? };
+            let dataset_triples = unsafe { CompressedRdfTriples::load(compressed_dataset)? };
 
             println!("loaded {} triples from main dataset", dataset_triples.len());
 
@@ -102,7 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let changesets: Vec<_> = rdf::changeset_file_iter(changeset_dir)
                     .map(Result::unwrap)
-                    .filter_map(|de| match CompressedRdfTriples::load(de.path()) {
+                    .filter_map(|de| match unsafe { CompressedRdfTriples::load(de.path()) } {
                         Ok(triples) => Some(triples),
                         Err(e) => {
                             eprintln!("Error: unable to open {:?}: {e:?}", de.path());
