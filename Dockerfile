@@ -1,4 +1,4 @@
-FROM rustlang/rust:nightly-bullseye-slim
+FROM docker.io/rustlang/rust:nightly-bullseye-slim
 
 WORKDIR /usr/local/src/sparql-delete-data-generator
 COPY ./Cargo.toml ./
