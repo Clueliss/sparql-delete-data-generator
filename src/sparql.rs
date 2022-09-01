@@ -1,15 +1,26 @@
 use crate::FrozenRdfTripleCompressor;
+use clap::ArgEnum;
+use rand::seq::SliceRandom;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::{
+    borrow::Borrow,
     collections::HashSet,
     fs::File,
-    hash::BuildHasherDefault,
+    hash::{BuildHasherDefault, Hash},
     io::{BufWriter, Write},
     path::Path,
     str::FromStr,
 };
-use rayon::iter::IntoParallelIterator;
-use rayon::iter::ParallelIterator;
 
+#[derive(Copy, Clone, ArgEnum)]
+pub enum OutputOrder {
+    AsSpecified,
+    Randomized,
+    SortedSizeAsc,
+    SortedSizeDesc,
+}
+
+#[derive(Clone, Copy)]
 pub struct QuerySpec {
     pub n_queries: usize,
     pub n_triples_per_query: usize,
@@ -35,41 +46,56 @@ impl FromStr for QuerySpec {
     }
 }
 
-pub fn generate_queries<F, I, Q, P>(
+pub fn generate_queries<P, Q, F, I, T>(
     out_file: P,
-    compressor: &FrozenRdfTripleCompressor,
     query_specs: Q,
-    triple_generator_factory: F,
+    compressor: &FrozenRdfTripleCompressor,
+    mut triple_generator_factory: F,
+    order: OutputOrder,
 ) -> std::io::Result<()>
 where
-    F: Fn() -> I + Sync,
-    I: Iterator<Item = [u64; 3]>,
-    Q: IntoParallelIterator<Item = QuerySpec>,
     P: AsRef<Path>,
+    Q: IntoIterator<Item = QuerySpec>,
+    F: FnMut(usize) -> I,
+    I: Iterator<Item = T> + Send,
+    T: Borrow<[u64; 3]> + Eq + Hash + Send,
 {
-    let queries: Vec<_> = query_specs
+    let generators: Vec<_> = {
+        let mut tmp: Vec<_> = query_specs
+            .into_iter()
+            .flat_map(|QuerySpec { n_queries, n_triples_per_query }| {
+                std::iter::repeat(n_triples_per_query).take(n_queries)
+            })
+            .map(|n_triples| (n_triples, triple_generator_factory(n_triples)))
+            .collect();
+
+        match order {
+            OutputOrder::AsSpecified => (),
+            OutputOrder::Randomized => tmp.shuffle(&mut rand::thread_rng()),
+            OutputOrder::SortedSizeAsc => tmp.sort_unstable_by_key(|(n_triples, _)| *n_triples),
+            OutputOrder::SortedSizeDesc => tmp.sort_unstable_by_key(|(n_triples, _)| std::cmp::Reverse(*n_triples)),
+        }
+
+        tmp
+    };
+
+    let queries: Vec<_> = generators
         .into_par_iter()
-        .flat_map(|QuerySpec { n_queries, n_triples_per_query }| {
-            println!("now generating {n_queries}x{n_triples_per_query} query set...");
+        .map(|(n_triples, mut triple_generator)| {
+            let mut remove_set: HashSet<_, BuildHasherDefault<ahash::AHasher>> = HashSet::default();
 
-            let ref_tgf = &triple_generator_factory;
-            (0..n_queries)
-                .into_par_iter()
-                .map(move |_| {
-                    let mut triple_generator = ref_tgf();
+            while let Some(triple) = triple_generator.next() {
+                remove_set.insert(triple);
+            }
 
-                    let mut remove_set: HashSet<_, BuildHasherDefault<ahash::AHasher>> = HashSet::default();
+            if remove_set.len() != n_triples {
+                println!(
+                    "Warning: requested query size {n_triples} cannot be fulfilled closest available size is {}",
+                    remove_set.len()
+                );
+            }
 
-                    while remove_set.len() < n_triples_per_query && let Some(triple) = triple_generator.next() {
-                        remove_set.insert(triple);
-                    }
-
-                    if remove_set.len() < n_triples_per_query {
-                        println!("Warning: not enough triples available to generate query of size {n_triples_per_query} available count is {}", remove_set.len());
-                    }
-
-                    remove_set
-                })
+            remove_set
         })
         .collect();
 
@@ -82,16 +108,20 @@ where
     Ok(())
 }
 
-fn write_delete_data_query<W: Write>(
+fn write_delete_data_query<W, T>(
     writer: &mut W,
-    triples: impl IntoIterator<Item = [u64; 3]>,
+    triples: impl IntoIterator<Item = T>,
     compressor: &FrozenRdfTripleCompressor,
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    W: Write,
+    T: Borrow<[u64; 3]>,
+{
     writeln!(writer, "DELETE DATA {{")?;
 
     for triple in triples {
         let [s, p, o] = compressor
-            .decompress_rdf_triple(&triple)
+            .decompress_rdf_triple(triple.borrow())
             .expect("to use same compressor as used for compression");
 
         writeln!(writer, "  {s} {p} {o} .")?;
