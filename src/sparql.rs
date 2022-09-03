@@ -52,6 +52,7 @@ pub fn generate_queries<P, Q, F, I, T>(
     compressor: &FrozenRdfTripleCompressor,
     mut triple_generator_factory: F,
     order: OutputOrder,
+    append: bool,
 ) -> std::io::Result<()>
 where
     P: AsRef<Path>,
@@ -99,7 +100,13 @@ where
         })
         .collect();
 
-    let mut bw = BufWriter::new(File::create(out_file)?);
+    let f = File::options()
+        .append(append)
+        .create(true)
+        .write(true)
+        .open(out_file)?;
+
+    let mut bw = BufWriter::new(f);
 
     for query in queries {
         write_delete_data_query(&mut bw, query, compressor)?;

@@ -48,6 +48,10 @@ enum Opts {
         #[clap(arg_enum, short = 'r', long, default_value_t = OutputOrder::AsSpecified)]
         output_order: OutputOrder,
 
+        /// append to query-out instead of overwriting it
+        #[clap(short, long, action)]
+        append: bool,
+
         #[clap(subcommand)]
         g_type: GenerateType,
 
@@ -122,6 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             query_specs,
             g_type,
             output_order,
+            append,
         } => {
             println!("loading main dataset...");
 
@@ -153,6 +158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &compressor,
                                 rdf::triple_generator::as_is_changeset_triple_generator(&changesets),
                                 output_order,
+                                append,
                             )
                         },
                         GenerateChangesetType::FixedSize => {
@@ -167,6 +173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &dataset_triples,
                                 ),
                                 output_order,
+                                append,
                             )
                         },
                     }?
@@ -180,6 +187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &compressor,
                         rdf::triple_generator::random_triple_generator(&dataset_triples),
                         output_order,
+                        append,
                     )?;
                 },
             }
