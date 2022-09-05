@@ -4,9 +4,8 @@ use rand::seq::SliceRandom;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::{
     borrow::Borrow,
-    collections::HashSet,
     fs::File,
-    hash::{BuildHasherDefault, Hash},
+    hash::Hash,
     io::{BufWriter, Write},
     path::Path,
     str::FromStr,
@@ -82,12 +81,8 @@ where
 
     let queries: Vec<_> = generators
         .into_par_iter()
-        .map(|(n_triples, mut triple_generator)| {
-            let mut remove_set: HashSet<_, BuildHasherDefault<ahash::AHasher>> = HashSet::default();
-
-            while let Some(triple) = triple_generator.next() {
-                remove_set.insert(triple);
-            }
+        .map(|(n_triples, triple_generator)| {
+            let remove_set: Vec<_> = triple_generator.collect();
 
             if remove_set.len() != n_triples {
                 println!(
@@ -102,6 +97,7 @@ where
 
     let f = File::options()
         .append(append)
+        .truncate(!append)
         .create(true)
         .write(true)
         .open(out_file)?;
@@ -124,15 +120,15 @@ where
     W: Write,
     T: Borrow<[u64; 3]>,
 {
-    writeln!(writer, "DELETE DATA {{")?;
+    write!(writer, "DELETE DATA {{ ")?;
 
     for triple in triples {
         let [s, p, o] = compressor
             .decompress_rdf_triple(triple.borrow())
             .expect("to use same compressor as used for compression");
 
-        writeln!(writer, "  {s} {p} {o} .")?;
+        write!(writer, "{s} {p} {o} . ")?;
     }
 
-    writeln!(writer, "}}\n")
+    writeln!(writer, "}}")
 }

@@ -124,12 +124,17 @@ impl RdfTripleCompressor {
                     continue;
                 }
 
-                let Some(triple) = super::split_rdf_triple(&line) else {
+                let Some([subject, predicate, object]) = super::split_rdf_triple(&line) else {
                     eprintln!("ignoring invalid rdf triple: {line:?}");
                     continue;
                 };
 
-                let [subject, predicate, object] = self.compress_rdf_triple_str(triple);
+                if subject.starts_with('_') || object.starts_with('_') {
+                    // ignore triples with blank nodes
+                    continue;
+                }
+
+                let [subject, predicate, object] = self.compress_rdf_triple_str([subject, predicate, object]);
 
                 bw.write_all(&subject.to_ne_bytes())?;
                 bw.write_all(&predicate.to_ne_bytes())?;

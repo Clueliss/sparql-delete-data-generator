@@ -4,15 +4,13 @@ use std::collections::HashSet;
 
 pub fn random_triple_generator<'a>(
     triples: &'a CompressedRdfTriples,
-) -> impl FnMut(usize) -> Box<dyn Iterator<Item = [u64; 3]> + Send + 'a> {
+) -> impl FnMut(usize) -> Box<dyn Iterator<Item = &'a [u64; 3]> + Send + 'a> {
     move |size_hint: usize| {
         let mut rng = rand::rngs::SmallRng::from_entropy();
 
-        let itr = std::iter::from_fn(move || {
-            let random = rng.gen_range(0..triples.len());
-            Some(triples[random])
-        })
-        .take(size_hint);
+        let itr = rand::seq::index::sample(&mut rng, triples.len(), size_hint)
+            .into_iter()
+            .map(|ix| &triples[ix]);
 
         Box::new(itr)
     }
