@@ -142,15 +142,26 @@ impl RdfTripleCompressor {
             }
         }
 
-        let mut mapped_slice: MemoryMapped<[[u64; 3]]> = unsafe {
-            MemoryMapped::options()
-                .read(true)
-                .write(true)
-                .open_shared_slice(out_path)?
-                .assume_init()
+        let f = File::options().read(true).write(true).open(out_path)?;
+
+        let n_uniq_triples = {
+            // sort and deduplicate triples
+
+            let mut mapped_slice: MemoryMapped<[[u64; 3]]> = unsafe {
+                MemoryMapped::options()
+                    .read(true)
+                    .write(true)
+                    .open_shared_slice_from_file(&f)?
+                    .assume_init()
+            };
+
+            mapped_slice.sort_unstable();
+            let (uniq, _) = mapped_slice.partition_dedup();
+
+            uniq.len()
         };
 
-        mapped_slice.sort_unstable();
+        f.set_len((n_uniq_triples * std::mem::size_of::<[u64; 3]>()) as u64)?;
 
         Ok(())
     }

@@ -8,7 +8,6 @@ use std::{
     hash::Hash,
     io::{BufWriter, Write},
     path::Path,
-    str::FromStr,
 };
 
 #[derive(Copy, Clone, ArgEnum)]
@@ -23,26 +22,6 @@ pub enum OutputOrder {
 pub struct QuerySpec {
     pub n_queries: usize,
     pub n_triples_per_query: usize,
-}
-
-impl FromStr for QuerySpec {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (n_queries, n_triples_per_query) = s
-            .split_once("x")
-            .ok_or_else(|| format!("invalid query spec, expected delimiter"))?;
-
-        let n_queries = n_queries
-            .parse()
-            .map_err(|e| format!("invalid query spec, first value is not integer: {e:?}"))?;
-
-        let n_triples_per_query = n_triples_per_query
-            .parse()
-            .map_err(|e| format!("invalid query spec, triple count specifier is not integer: {e:?}"))?;
-
-        Ok(QuerySpec { n_queries, n_triples_per_query })
-    }
 }
 
 pub fn generate_queries<P, Q, F, I, T>(
@@ -82,7 +61,13 @@ where
     let queries: Vec<_> = generators
         .into_par_iter()
         .map(|(n_triples, triple_generator)| {
-            let remove_set: Vec<_> = triple_generator.collect();
+            let remove_set: Vec<_> = triple_generator
+                .map(|triple| {
+                    compressor
+                        .decompress_rdf_triple(triple.borrow())
+                        .expect("to use same compressor as used for compression")
+                })
+                .collect();
 
             if remove_set.len() != n_triples {
                 println!(
@@ -95,6 +80,43 @@ where
         })
         .collect();
 
+    write_delete_data_queries(out_file, append, queries)
+}
+
+pub fn generate_linear_no_size_hint<P, F, I, T>(
+    out_file: P,
+    compressor: &FrozenRdfTripleCompressor,
+    triple_generator_factory: F,
+    append: bool,
+) -> std::io::Result<()>
+where
+    P: AsRef<Path>,
+    F: IntoIterator<Item = I>,
+    I: Iterator<Item = T> + Send,
+    T: Borrow<[u64; 3]> + Eq + Hash + Send,
+{
+    let generators: Vec<_> = triple_generator_factory.into_iter().collect();
+
+    let queries: Vec<Vec<_>> = generators
+        .into_par_iter()
+        .map(|triple_generator| {
+            triple_generator
+                .map(|triple| {
+                    compressor
+                        .decompress_rdf_triple(triple.borrow())
+                        .expect("to use same compressor as used for compression")
+                })
+                .collect()
+        })
+        .collect();
+
+    write_delete_data_queries(out_file, append, queries)
+}
+
+fn write_delete_data_queries<P>(out_file: P, append: bool, queries: Vec<Vec<[&str; 3]>>) -> std::io::Result<()>
+where
+    P: AsRef<Path>,
+{
     let f = File::options()
         .append(append)
         .truncate(!append)
@@ -102,33 +124,17 @@ where
         .write(true)
         .open(out_file)?;
 
-    let mut bw = BufWriter::new(f);
+    let mut writer = BufWriter::new(f);
 
     for query in queries {
-        write_delete_data_query(&mut bw, query, compressor)?;
+        write!(writer, "DELETE DATA {{ ")?;
+
+        for [s, p, o] in query {
+            write!(writer, "{s} {p} {o} . ")?;
+        }
+
+        writeln!(writer, "}}")?;
     }
 
     Ok(())
-}
-
-fn write_delete_data_query<W, T>(
-    writer: &mut W,
-    triples: impl IntoIterator<Item = T>,
-    compressor: &FrozenRdfTripleCompressor,
-) -> std::io::Result<()>
-where
-    W: Write,
-    T: Borrow<[u64; 3]>,
-{
-    write!(writer, "DELETE DATA {{ ")?;
-
-    for triple in triples {
-        let [s, p, o] = compressor
-            .decompress_rdf_triple(triple.borrow())
-            .expect("to use same compressor as used for compression");
-
-        write!(writer, "{s} {p} {o} . ")?;
-    }
-
-    writeln!(writer, "}}")
 }

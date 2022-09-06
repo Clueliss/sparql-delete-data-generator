@@ -2,10 +2,26 @@ use crate::CompressedRdfTriples;
 use rand::{Rng, SeedableRng};
 use std::collections::HashSet;
 
+pub fn random_distinct_triple_generator<'a>(
+    triples: &'a CompressedRdfTriples,
+    n_total_query_triples: usize,
+) -> impl FnMut(usize) -> Box<dyn Iterator<Item = &'a [u64; 3]> + Send + 'a> {
+    let mut rng = rand::rngs::SmallRng::from_entropy();
+    let mut itr = rand::seq::index::sample(&mut rng, triples.len(), n_total_query_triples).into_iter();
+
+    move |size_hint: usize| {
+        let ret = itr.clone().take(size_hint).map(|ix| &triples[ix]);
+
+        let _ = itr.advance_by(size_hint);
+
+        Box::new(ret)
+    }
+}
+
 pub fn random_triple_generator<'a>(
     triples: &'a CompressedRdfTriples,
 ) -> impl FnMut(usize) -> Box<dyn Iterator<Item = &'a [u64; 3]> + Send + 'a> {
-    move |size_hint: usize| {
+    |size_hint: usize| {
         let mut rng = rand::rngs::SmallRng::from_entropy();
 
         let itr = rand::seq::index::sample(&mut rng, triples.len(), size_hint)
@@ -57,4 +73,18 @@ pub fn as_is_changeset_triple_generator<'c>(
 
         Box::new(changeset.iter())
     }
+}
+
+pub fn linear_changeset_triple_generator<'c>(
+    changesets: &'c [CompressedRdfTriples],
+) -> impl Iterator<Item = Box<dyn Iterator<Item = &'c [u64; 3]> + Send + 'c>> {
+    let mut cur = 0;
+
+    std::iter::from_fn(move || {
+        let ret = changesets.get(cur).map(|chs| Box::new(chs.iter()) as _);
+
+        cur += 1;
+
+        ret
+    })
 }

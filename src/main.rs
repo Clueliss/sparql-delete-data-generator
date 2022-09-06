@@ -1,13 +1,66 @@
-#![feature(hasher_prefixfree_extras, let_else)]
+#![feature(iter_advance_by, hasher_prefixfree_extras, let_else, slice_partition_dedup)]
 
 mod rdf;
 mod sparql;
 
-use crate::sparql::OutputOrder;
 use clap::{ArgEnum, Parser, Subcommand};
 use memory_mapped::MemoryMapped;
 use rdf::triple_compressor::{frozen::FrozenRdfTripleCompressor, CompressedRdfTriples, RdfTripleCompressor};
-use std::path::PathBuf;
+use sparql::OutputOrder;
+use std::{path::PathBuf, str::FromStr};
+
+#[derive(Clone, Copy)]
+pub struct QuerySpecOpt {
+    n_queries: usize,
+    n_triples_per_query: QuerySizeOpt,
+}
+
+#[derive(Clone, Copy)]
+pub enum QuerySizeOpt {
+    Percentage(f64),
+    Absolute(usize),
+}
+
+impl FromStr for QuerySpecOpt {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (n_queries, n_triples_per_query) = s
+            .split_once("x")
+            .ok_or_else(|| format!("invalid query spec, expected delimiter"))?;
+
+        let n_queries = n_queries
+            .parse()
+            .map_err(|e| format!("invalid query spec, first value is not integer: {e:?}"))?;
+
+        let n_triples_per_query = if n_triples_per_query.ends_with('%') {
+            QuerySizeOpt::Percentage(
+                n_triples_per_query
+                    .trim_end_matches('%')
+                    .parse::<f64>()
+                    .map_err(|e| format!("invalid query spec, triple count specifier is not integer: {e:?}"))?
+                    / 100.0,
+            )
+        } else {
+            QuerySizeOpt::Absolute(
+                n_triples_per_query
+                    .parse()
+                    .map_err(|e| format!("invalid query spec, triple count specifier is not integer: {e:?}"))?,
+            )
+        };
+
+        Ok(QuerySpecOpt { n_queries, n_triples_per_query })
+    }
+}
+
+impl QuerySizeOpt {
+    pub fn get_absolute(self, n_total_triples: usize) -> usize {
+        match self {
+            QuerySizeOpt::Absolute(n) => n,
+            QuerySizeOpt::Percentage(percent) => (n_total_triples as f64 * percent) as usize,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[clap(author, version, about)]
@@ -57,14 +110,19 @@ enum Opts {
 
         /// Query specs of the form <N_QUERIES>x<N_TRIPLE_PER_QUERY>
         #[clap(value_parser, global(true))]
-        query_specs: Vec<sparql::QuerySpec>,
+        query_specs: Vec<QuerySpecOpt>,
     },
 }
 
 #[derive(Subcommand)]
 enum GenerateType {
     /// derives the queries by selecting random triples from the dataset
-    Randomized,
+    Randomized {
+        /// allow the generator to generate distinct queries
+        /// with common triples
+        #[clap(short = 'd', long, action)]
+        allow_duplicates: bool,
+    },
 
     /// derives the queries from a set of changesets
     Changeset {
@@ -87,6 +145,10 @@ enum GenerateChangesetType {
     /// truncates or stitches changesets together to fulfill the requested
     /// sizes exactly
     FixedSize,
+
+    /// linearly go through all changesets and generate a query for
+    /// each changeset
+    Linear,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -133,7 +195,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let compressor = unsafe { FrozenRdfTripleCompressor::load_frozen(compressor_state)? };
             let dataset_triples = unsafe { CompressedRdfTriples::load(compressed_dataset)? };
 
-            println!("loaded {} triples from main dataset", dataset_triples.len());
+            println!("loaded {} distinct triples from main dataset", dataset_triples.len());
+
+            let query_specs: Vec<_> = query_specs
+                .into_iter()
+                .map(|QuerySpecOpt { n_queries, n_triples_per_query }| sparql::QuerySpec {
+                    n_queries,
+                    n_triples_per_query: n_triples_per_query.get_absolute(dataset_triples.len()),
+                })
+                .collect();
 
             match g_type {
                 GenerateType::Changeset { compressed_changeset_dir, generate_type } => {
@@ -176,9 +246,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 append,
                             )
                         },
-                    }?
+                        GenerateChangesetType::Linear => {
+                            println!("generating queries by linearly iterating changesets...");
+
+                            if !query_specs.is_empty() {
+                                println!("Warning: ignoring query specs in linear generation mode");
+                            }
+
+                            sparql::generate_linear_no_size_hint(
+                                query_out,
+                                &compressor,
+                                rdf::triple_generator::linear_changeset_triple_generator(&changesets),
+                                append,
+                            )
+                        },
+                    }
                 },
-                GenerateType::Randomized => {
+                GenerateType::Randomized { allow_duplicates: false } => {
+                    println!("generating distinct queries from main dataset...");
+
+                    let total_query_triples: usize = query_specs
+                        .iter()
+                        .map(|sparql::QuerySpec { n_queries, n_triples_per_query }| n_queries * n_triples_per_query)
+                        .sum();
+
+                    sparql::generate_queries(
+                        query_out,
+                        query_specs,
+                        &compressor,
+                        rdf::triple_generator::random_distinct_triple_generator(&dataset_triples, total_query_triples),
+                        output_order,
+                        append,
+                    )
+                },
+                GenerateType::Randomized { allow_duplicates: true } => {
                     println!("generating queries from main dataset...");
 
                     sparql::generate_queries(
@@ -188,9 +289,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         rdf::triple_generator::random_triple_generator(&dataset_triples),
                         output_order,
                         append,
-                    )?;
+                    )
                 },
-            }
+            }?
         },
     }
 
