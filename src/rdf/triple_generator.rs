@@ -1,4 +1,4 @@
-use crate::CompressedRdfTriples;
+use crate::rdf::triple_compressor::CompressedRdfTriples;
 use rand::{Rng, SeedableRng};
 use std::collections::HashSet;
 
@@ -82,7 +82,6 @@ pub fn linear_changeset_triple_generator<'c>(
 
     std::iter::from_fn(move || {
         let ret = changesets.get(cur).map(|chs| Box::new(chs.iter()) as _);
-
         cur += 1;
 
         ret
