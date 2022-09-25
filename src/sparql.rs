@@ -8,7 +8,6 @@ use std::{
     hash::Hash,
     io::{BufWriter, Write},
     path::Path,
-    sync::atomic::{AtomicUsize, Ordering},
 };
 
 #[derive(Copy, Clone, ArgEnum)]
@@ -89,7 +88,6 @@ pub fn generate_linear_no_size_hint<P, F, I, T>(
     decompressor: &RdfTripleDecompressor,
     triple_generator_factory: F,
     append: bool,
-    //dataset_triples: &CompressedRdfTriples,
 ) -> std::io::Result<()>
 where
     P: AsRef<Path>,
@@ -99,17 +97,10 @@ where
 {
     let generators: Vec<_> = triple_generator_factory.into_iter().collect();
 
-    let n = AtomicUsize::new(0);
-
     let queries: Vec<Vec<_>> = generators
         .into_par_iter()
         .map(|triple_generator| {
             let triples: Vec<_> = triple_generator
-                /*.inspect(|t| {
-                    if dataset_triples.contains(t.borrow()) {
-                        n.fetch_add(1, Ordering::SeqCst);
-                    }
-                })*/
                 .map(|triple| {
                     decompressor
                         .decompress_rdf_triple(triple.borrow())
@@ -120,8 +111,6 @@ where
             triples
         })
         .collect();
-
-    println!("{}", n.load(Ordering::SeqCst));
 
     write_delete_data_queries(out_file, append, queries)
 }

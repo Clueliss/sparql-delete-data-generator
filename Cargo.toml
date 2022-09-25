@@ -8,8 +8,10 @@ description = "Compress n-triple datasets and generate SPARQL DELETE DATA querie
 [dependencies]
 clap = { version = "3.2.16", features = ["derive"] }
 rand = { version = "0.8.5", features = ["small_rng"] }
-chrono = "0.4.21"
-ahash = "0.8.0"
+ahash = { version = "0.8.0", default-features = false } # do not enable std feature as hashes will be different between program executions
 walkdir = "2.3.2"
 memory_mapped = { git = "https://github.com/Clueliss/memory-mapped", rev = "66f0dfb" }
 rayon = "1.5.3"
+thiserror = "1.0.35"
+rio_turtle = "0.7.1"
+rio_api = "0.7.1"

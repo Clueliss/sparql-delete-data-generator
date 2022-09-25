@@ -1,11 +1,11 @@
-use crate::rdf::triple_compressor::CompressedRdfTriples;
+use crate::rdf::triple_compressor::{CompressedRdfTriples, TripleElementId};
 use rand::{Rng, SeedableRng};
 use std::collections::HashSet;
 
 pub fn random_distinct_triple_generator<'a>(
     triples: &'a CompressedRdfTriples,
     n_total_query_triples: usize,
-) -> impl FnMut(usize) -> Box<dyn Iterator<Item = &'a [u64; 3]> + Send + 'a> {
+) -> impl FnMut(usize) -> Box<dyn Iterator<Item = &'a [TripleElementId; 3]> + Send + 'a> {
     let mut rng = rand::rngs::SmallRng::from_entropy();
     let mut itr = rand::seq::index::sample(&mut rng, triples.len(), n_total_query_triples).into_iter();
 
@@ -20,7 +20,7 @@ pub fn random_distinct_triple_generator<'a>(
 
 pub fn random_triple_generator<'a>(
     triples: &'a CompressedRdfTriples,
-) -> impl FnMut(usize) -> Box<dyn Iterator<Item = &'a [u64; 3]> + Send + 'a> {
+) -> impl FnMut(usize) -> Box<dyn Iterator<Item = &'a [TripleElementId; 3]> + Send + 'a> {
     |size_hint: usize| {
         let mut rng = rand::rngs::SmallRng::from_entropy();
 
@@ -35,7 +35,7 @@ pub fn random_triple_generator<'a>(
 pub fn fixed_size_changeset_triple_generator<'a, 'c, 'd>(
     changesets: &'c [CompressedRdfTriples],
     dataset: &'d CompressedRdfTriples,
-) -> impl FnMut(usize) -> Box<dyn Iterator<Item = &'c [u64; 3]> + Send + 'a>
+) -> impl FnMut(usize) -> Box<dyn Iterator<Item = &'c [TripleElementId; 3]> + Send + 'a>
 where
     'c: 'a,
     'd: 'a,
@@ -56,7 +56,7 @@ where
 
 pub fn as_is_changeset_triple_generator<'c>(
     changesets: &'c [CompressedRdfTriples],
-) -> impl FnMut(usize) -> Box<dyn Iterator<Item = &'c [u64; 3]> + Send + 'c> {
+) -> impl FnMut(usize) -> Box<dyn Iterator<Item = &'c [TripleElementId; 3]> + Send + 'c> {
     let mut used = HashSet::new();
 
     move |size_hint: usize| {
@@ -77,7 +77,7 @@ pub fn as_is_changeset_triple_generator<'c>(
 
 pub fn linear_changeset_triple_generator<'c>(
     changesets: &'c [CompressedRdfTriples],
-) -> impl Iterator<Item = Box<dyn Iterator<Item = &'c [u64; 3]> + Send + 'c>> {
+) -> impl Iterator<Item = Box<dyn Iterator<Item = &'c [TripleElementId; 3]> + Send + 'c>> {
     let mut cur = 0;
 
     std::iter::from_fn(move || {

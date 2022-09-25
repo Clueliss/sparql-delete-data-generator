@@ -1,4 +1,5 @@
 use super::{CompressedRdfTriples, UNCOMPRESSED_TRIPLE_FILE_EXTENSION};
+use crate::rdf::triple_compressor::TripleElementId;
 use memory_mapped::MemoryMapped;
 use std::{
     fs::File,
@@ -7,12 +8,12 @@ use std::{
 };
 
 pub struct RdfTripleDecompressor {
-    pub(super) header: MemoryMapped<[(u64, usize, usize)]>,
+    pub(super) header: MemoryMapped<[(TripleElementId, usize, usize)]>,
     pub(super) data_segment: MemoryMapped<[u8]>,
 }
 
 impl RdfTripleDecompressor {
-    fn search_header(&self, hash: u64) -> Option<&(u64, usize, usize)> {
+    fn search_header(&self, hash: TripleElementId) -> Option<&(TripleElementId, usize, usize)> {
         let ix = self.header.binary_search_by_key(&hash, |(h, _, _)| *h).ok()?;
         Some(&self.header[ix])
     }
@@ -43,7 +44,7 @@ impl RdfTripleDecompressor {
         Ok(Self { header, data_segment })
     }
 
-    pub fn decompress_rdf_triple(&self, [subject, predicate, object]: &[u64; 3]) -> Option<[&str; 3]> {
+    pub fn decompress_rdf_triple(&self, [subject, predicate, object]: &[TripleElementId; 3]) -> Option<[&str; 3]> {
         let &(_, s_start, s_end) = self.search_header(*subject)?;
         let &(_, p_start, p_end) = self.search_header(*predicate)?;
         let &(_, o_start, o_end) = self.search_header(*object)?;

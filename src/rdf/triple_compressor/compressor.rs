@@ -1,15 +1,34 @@
-use memory_mapped::MemoryMapped;
+use super::TripleElementId;
+use crate::rdf::triple_compressor::TripleId;
+use rio_api::{
+    model::{Subject, Term, Triple},
+    parser::TriplesParser,
+};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashSet},
     fs::{File, OpenOptions},
-    hash::{BuildHasherDefault, Hasher},
-    io::{BufRead, BufReader, BufWriter, Write},
+    hash::{BuildHasher, BuildHasherDefault, Hash, Hasher},
+    io::{BufReader, BufWriter, Write},
     path::Path,
 };
 
+fn hash_single<T: Hash, H: BuildHasher>(to_hash: T, build_hasher: H) -> u64 {
+    let mut hasher = build_hasher.build_hasher();
+    to_hash.hash(&mut hasher);
+    hasher.finish()
+}
+
 #[derive(Default)]
 pub struct RdfTripleCompressor {
-    translations: HashMap<u64, String, BuildHasherDefault<ahash::AHasher>>,
+    translations: BTreeMap<TripleElementId, String>,
+    dedup: HashSet<TripleId, BuildHasherDefault<ahash::AHasher>>,
+}
+
+impl RdfTripleCompressor {
+    fn found_new_triple(&mut self, triple: [TripleElementId; 3]) -> bool {
+        let hash = hash_single(triple, BuildHasherDefault::<ahash::AHasher>::default());
+        self.dedup.insert(hash)
+    }
 }
 
 impl RdfTripleCompressor {
@@ -18,47 +37,31 @@ impl RdfTripleCompressor {
     }
 
     pub fn save_state<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<()> {
-        let header_size = self.translations.len() * std::mem::size_of::<(u64, usize, usize)>();
+        let header_size = self.translations.len() * std::mem::size_of::<(TripleElementId, usize, usize)>();
 
-        {
-            let f = OpenOptions::new().write(true).create(true).open(&path)?;
-            let mut bw = BufWriter::new(f);
+        let f = OpenOptions::new().write(true).create(true).open(&path)?;
+        let mut bw = BufWriter::new(f);
 
-            bw.write_all(&header_size.to_ne_bytes())?;
+        bw.write_all(&header_size.to_ne_bytes())?;
 
-            let mut data_segment_off: usize = 0;
-            for (hash, rdf_str) in &self.translations {
-                bw.write_all(&hash.to_ne_bytes())?;
-                bw.write_all(&data_segment_off.to_ne_bytes())?;
+        let mut data_segment_off: usize = 0;
+        for (hash, rdf_str) in &self.translations {
+            bw.write_all(&hash.to_ne_bytes())?;
+            bw.write_all(&data_segment_off.to_ne_bytes())?;
 
-                data_segment_off += rdf_str.as_bytes().len();
-                bw.write_all(&data_segment_off.to_ne_bytes())?;
-            }
-
-            for rdf_str in self.translations.values() {
-                bw.write_all(rdf_str.as_bytes())?;
-            }
+            data_segment_off += rdf_str.as_bytes().len();
+            bw.write_all(&data_segment_off.to_ne_bytes())?;
         }
 
-        {
-            let mut hdr: MemoryMapped<[(u64, usize, usize)]> = unsafe {
-                MemoryMapped::options()
-                    .read(true)
-                    .write(true)
-                    .byte_offset(std::mem::size_of::<usize>())
-                    .byte_len(header_size)
-                    .open_shared_slice(path)?
-                    .assume_init()
-            };
-
-            hdr.sort_unstable_by_key(|(hash, _, _)| *hash);
+        for rdf_str in self.translations.values() {
+            bw.write_all(rdf_str.as_bytes())?;
         }
 
         Ok(())
     }
 
     pub fn from_decompressor(frozen: super::decompressor::RdfTripleDecompressor) -> Self {
-        let mut translations = HashMap::default();
+        let mut translations = BTreeMap::default();
 
         for (hash, s_beg, s_end) in frozen.header {
             let rdf_data = frozen.data_segment[s_beg..s_end].to_owned();
@@ -66,23 +69,25 @@ impl RdfTripleCompressor {
             translations.insert(hash, unsafe { String::from_utf8_unchecked(rdf_data) });
         }
 
-        Self { translations }
+        Self { translations, dedup: HashSet::default() }
     }
 
-    pub fn compress_rdf_triple_str(&mut self, [subject, predicate, object]: [&str; 3]) -> [u64; 3] {
-        let hash = |s| {
-            let mut hasher = ahash::AHasher::default();
-            hasher.write_str(s);
-            hasher.finish()
-        };
+    pub fn compress_rdf_triple(&mut self, triple: Triple) -> [TripleElementId; 3] {
+        type BuildHasher = BuildHasherDefault<ahash::AHasher>;
 
-        let subject_hash = hash(subject);
-        let predicate_hash = hash(predicate);
-        let object_hash = hash(object);
+        let subject_hash = hash_single(triple.subject, BuildHasher::default());
+        let predicate_hash = hash_single(triple.predicate, BuildHasher::default());
+        let object_hash = hash_single(triple.object, BuildHasher::default());
 
-        self.translations.insert(subject_hash, subject.to_owned());
-        self.translations.insert(predicate_hash, predicate.to_owned());
-        self.translations.insert(object_hash, object.to_owned());
+        self.translations
+            .entry(subject_hash)
+            .or_insert_with(|| triple.subject.to_string());
+        self.translations
+            .entry(predicate_hash)
+            .or_insert_with(|| triple.predicate.to_string());
+        self.translations
+            .entry(object_hash)
+            .or_insert_with(|| triple.object.to_string());
 
         [subject_hash, predicate_hash, object_hash]
     }
@@ -90,58 +95,57 @@ impl RdfTripleCompressor {
     pub fn compress_rdf_triple_file<P: AsRef<Path>>(&mut self, path: P, dedup: bool) -> std::io::Result<()> {
         let out_path = path.as_ref().with_extension(super::COMPRESSED_TRIPLE_FILE_EXTENSION);
 
-        {
-            let mut bw = BufWriter::new(File::options().write(true).create_new(true).open(&out_path)?);
+        let mut bw = BufWriter::new(File::options().write(true).create_new(true).open(&out_path)?);
+        let mut triples = rio_turtle::NTriplesParser::new(BufReader::new(File::open(path)?));
 
-            let triples = BufReader::new(File::open(path)?).lines();
+        let (writer_res, reader_res) = std::thread::scope(move |s| {
+            let (tx, rx) = std::sync::mpsc::channel::<[TripleElementId; 3]>();
 
-            for line in triples {
-                let line = line?;
-
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
+            let writer = s.spawn(move || -> std::io::Result<()> {
+                while let Ok([s, p, o]) = rx.recv() {
+                    bw.write_all(&s.to_ne_bytes())?;
+                    bw.write_all(&p.to_ne_bytes())?;
+                    bw.write_all(&o.to_ne_bytes())?;
                 }
 
-                let Some([subject, predicate, object]) = crate::rdf::split_rdf_triple(&line) else {
-                    eprintln!("ignoring invalid rdf triple: {line:?}");
-                    continue;
-                };
+                Ok(())
+            });
 
-                if subject.starts_with('_') || object.starts_with('_') {
-                    // ignore triples with blank nodes
-                    continue;
+            let reader = s.spawn(move || -> std::io::Result<()> {
+                while !triples.is_end() {
+                    let res: Result<(), std::io::Error> = triples.parse_step(&mut |triple| {
+                        let subject@Subject::NamedNode(_) = triple.subject else {
+                            return Ok(());
+                        };
+
+                        let predicate = triple.predicate;
+
+                        let object@(Term::NamedNode(_) | Term::Literal(_)) = triple.object else {
+                            return Ok(());
+                        };
+
+                        let triple = self.compress_rdf_triple(Triple { subject, predicate, object });
+
+                        if !dedup || self.found_new_triple(triple) {
+                            tx.send(triple).unwrap();
+                        }
+
+                        Ok(())
+                    });
+
+                    if let Err(e) = res {
+                        eprintln!("{e}")
+                    }
                 }
 
-                let [subject, predicate, object] = self.compress_rdf_triple_str([subject, predicate, object]);
+                Ok(())
+            });
 
-                bw.write_all(&subject.to_ne_bytes())?;
-                bw.write_all(&predicate.to_ne_bytes())?;
-                bw.write_all(&object.to_ne_bytes())?;
-            }
-        }
+            (writer.join(), reader.join())
+        });
 
-        if dedup {
-            let f = File::options().read(true).write(true).open(out_path)?;
-
-            let n_uniq_triples = {
-                // sort and deduplicate triples
-
-                let mut mapped_slice: MemoryMapped<[[u64; 3]]> = unsafe {
-                    MemoryMapped::options()
-                        .read(true)
-                        .write(true)
-                        .open_shared_slice_from_file(&f)?
-                        .assume_init()
-                };
-
-                mapped_slice.sort_unstable();
-                let (uniq, _) = mapped_slice.partition_dedup();
-
-                uniq.len()
-            };
-
-            f.set_len((n_uniq_triples * std::mem::size_of::<[u64; 3]>()) as u64)?;
-        }
+        writer_res.unwrap()?;
+        reader_res.unwrap()?;
 
         Ok(())
     }

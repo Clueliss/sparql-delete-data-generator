@@ -1,13 +1,9 @@
-#![feature(
-    iter_advance_by,
-    hasher_prefixfree_extras,
-    let_else,
-    slice_partition_dedup,
-    is_sorted
-)]
+#![feature(hasher_prefixfree_extras, is_sorted, iter_advance_by, let_else)]
+#![feature(slice_partition_dedup)]
 
 mod rdf;
 mod sparql;
+mod util;
 
 use clap::{ArgEnum, Parser, Subcommand};
 use memory_mapped::MemoryMapped;
@@ -16,7 +12,8 @@ use rdf::triple_compressor::{
     COMPRESSED_TRIPLE_FILE_EXTENSION, UNCOMPRESSED_TRIPLE_FILE_EXTENSION,
 };
 use sparql::OutputOrder;
-use std::{path::PathBuf, str::FromStr};
+use std::{collections::HashSet, hash::BuildHasherDefault, path::PathBuf, str::FromStr};
+use util::{changeset_file_iter, dataset_iter};
 
 #[derive(Clone, Copy)]
 pub struct QuerySpecOpt {
@@ -35,8 +32,8 @@ impl FromStr for QuerySpecOpt {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (n_queries, n_triples_per_query) = s
-            .split_once("x")
-            .ok_or_else(|| format!("invalid query spec, expected delimiter"))?;
+            .split_once('x')
+            .ok_or_else(|| "invalid query spec, expected delimiter".to_owned())?;
 
         let n_queries = n_queries
             .parse()
@@ -158,6 +155,36 @@ enum Opts {
         /// The datasets to replicate
         compressed_datasets: Vec<PathBuf>,
     },
+    /// Print stats about compressed datasets (triple count, number of subjects, predicates, objects)
+    Stats {
+        /// Operate recursively on directories
+        #[clap(short = 'r', long, action)]
+        recursive: bool,
+
+        /// The datasets to analyze
+        compressed_datasets: Vec<PathBuf>,
+    },
+    /// Sort compressed datasets so that they can be used as main datasets for query generation or contained
+    Sort {
+        /// Operate recursively on directories
+        #[clap(short = 'r', long, action)]
+        recursive: bool,
+
+        compressed_datasets: Vec<PathBuf>,
+    },
+    /// Check how many of the triples in `compressed_datasets` are contained in `main_dataset`
+    Contained {
+        /// The main dataset to check against
+        #[clap(short = 'd', long)]
+        main_dataset: PathBuf,
+
+        /// Operate recursively on directories
+        #[clap(short = 'r', long, action)]
+        recursive: bool,
+
+        /// The datasets to check against the main dataset
+        compressed_datasets: Vec<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -191,36 +218,6 @@ enum GenerateChangesetType {
     /// truncates or stitches changesets together to fulfill the requested
     /// sizes exactly
     FixedSize,
-}
-
-fn dataset_iter(
-    paths: Vec<PathBuf>,
-    recursive: bool,
-    extension: &str,
-) -> impl Iterator<Item = walkdir::Result<PathBuf>> + '_ {
-    paths.into_iter().flat_map(move |path| {
-        if path.is_dir() {
-            if recursive {
-                walkdir::WalkDir::new(path)
-                    .into_iter()
-                    .filter_map(|e| match e {
-                        Ok(e)
-                            if e.file_type().is_file()
-                                && matches!(e.path().extension(), Some(ext) if ext == extension) =>
-                        {
-                            Some(Ok(e.into_path()))
-                        },
-                        Ok(_) => None,
-                        other => Some(other.map(|e| e.into_path())),
-                    })
-                    .collect()
-            } else {
-                vec![]
-            }
-        } else {
-            vec![Ok(path)]
-        }
-    })
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -289,16 +286,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             match g_type {
                 GenerateType::Changeset { compressed_changesets: compressed_changeset_dir, generate_type } => {
-                    let changesets: Vec<_> = rdf::changeset_file_iter(compressed_changeset_dir)
-                        .map(Result::unwrap)
-                        .filter_map(|de| match unsafe { CompressedRdfTriples::load(de.path()) } {
-                            Ok(triples) => Some(triples),
-                            Err(e) => {
-                                eprintln!("Error: unable to open {:?}: {e:?}", de.path());
-                                None
-                            },
-                        })
-                        .collect();
+                    let changesets: Vec<_> =
+                        changeset_file_iter(compressed_changeset_dir, COMPRESSED_TRIPLE_FILE_EXTENSION)
+                            .map(Result::unwrap)
+                            .filter_map(|de| match unsafe { CompressedRdfTriples::load(de.path()) } {
+                                Ok(triples) => Some(triples),
+                                Err(e) => {
+                                    eprintln!("Error: unable to open {:?}: {e:?}", de.path());
+                                    None
+                                },
+                            })
+                            .collect();
 
                     match generate_type {
                         GenerateChangesetType::AsIs => {
@@ -383,7 +381,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &decompressor,
                 rdf::triple_generator::linear_changeset_triple_generator(&datasets),
                 append,
-                //&dataset_triples
             )?;
         },
         Opts::Decompress { compressor_state, recursive, compressed_datasets } => {
@@ -395,6 +392,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 println!("decompressing {dataset:?}...");
                 decompressor.decompress_rdf_triple_file(dataset)?;
+            }
+        },
+        Opts::Stats { recursive, compressed_datasets } => {
+            for path in dataset_iter(compressed_datasets, recursive, COMPRESSED_TRIPLE_FILE_EXTENSION) {
+                let path = path?;
+                match unsafe { CompressedRdfTriples::load(&path) } {
+                    Ok(dataset) => {
+                        type BuildHasher = BuildHasherDefault<ahash::AHasher>;
+
+                        let mut subjects_dedup = HashSet::with_hasher(BuildHasher::default());
+                        let mut predicates_dedup = HashSet::with_hasher(BuildHasher::default());
+                        let mut objects_dedup = HashSet::with_hasher(BuildHasher::default());
+
+                        for &[s, p, o] in dataset.iter() {
+                            subjects_dedup.insert(s);
+                            predicates_dedup.insert(p);
+                            objects_dedup.insert(o);
+                        }
+
+                        let total = dataset.len();
+                        let ns = subjects_dedup.len();
+                        let np = predicates_dedup.len();
+                        let no = objects_dedup.len();
+
+                        println!("{path:?}: number of triples = {total}, number of distinct subjects = {ns}, number of distinct predicates = {np}, number of distinct objects = {no}");
+                    },
+                    Err(e) => eprintln!("Error: unable to open {path:?}: {e:?}; skipping"),
+                }
+            }
+        },
+        Opts::Sort { recursive, compressed_datasets } => {
+            for path in dataset_iter(compressed_datasets, recursive, COMPRESSED_TRIPLE_FILE_EXTENSION) {
+                let path = path?;
+                match unsafe { CompressedRdfTriples::load_shared(&path) } {
+                    Ok(mut dataset) => {
+                        println!("sorting {path:?}...");
+                        dataset.sort_unstable();
+                    },
+                    Err(e) => eprintln!("Error: unable to open {path:?}: {e:?}; skipping"),
+                }
+            }
+        },
+        Opts::Contained { main_dataset: dataset, recursive, compressed_datasets } => {
+            println!("loading main dataset...");
+            let dataset_triples = unsafe { CompressedRdfTriples::load(dataset)? };
+            assert!(
+                dataset_triples.is_sorted(),
+                "dataset triples must be sorted to ensure correct query generation"
+            );
+
+            for path in dataset_iter(compressed_datasets, recursive, COMPRESSED_TRIPLE_FILE_EXTENSION) {
+                let path = path?;
+                match unsafe { CompressedRdfTriples::load(&path) } {
+                    Ok(dataset) => {
+                        let total = dataset.len();
+                        let contained = dataset.iter().filter(|t| dataset_triples.contains(t)).count();
+
+                        println!(
+                            "{contained}/{total} ({percentage:.2}%) of triples from {path:?} are contained in the main dataset",
+                            percentage = 100.0 * (contained as f32) / (total as f32)
+                        );
+                    },
+                    Err(e) => eprintln!("Error: unable to open {path:?}: {e:?}; skipping"),
+                }
             }
         },
     }
